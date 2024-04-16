@@ -215,13 +215,13 @@ class Multixrank(object):
             layer_counter = 0
         return node_index_map, layer_index_map
 
-    def __simulated_random_walk_with_restart(self, transition_matrixcoo: scipy.sparse.coo_matrix, seeds: List[object],
+    def __simulated_random_walk_with_restart(self, transition_matrixcsr: scipy.sparse.csr_matrix, seeds: List[object],
                                              r: float, num_walks: int = 100, max_steps: int = 100) -> pandas.DataFrame:
         """
         Simulate a random walk with restart from the given seed nodes and logs each step.
 
         Args:
-            transition_matrixcoo (scipy.sparse.coo_matrix): The transition matrix in COO format.
+            transition_matrixcsr (scipy.sparse.csr_matrix): The transition matrix in CSR format.
             seeds (list): List of node indices representing seed nodes.
             r (float): Restart probability.
             num_walks (int): Number of random walks to perform. Default is 100.
@@ -233,22 +233,9 @@ class Multixrank(object):
         """
 
         def single_walk(walk_id: int) -> List[List[Union[int, str]]]:
-            """
-            Simulate a single random walk with restart from a given seed node and logs each step.
-
-            Args:
-                walk_id (int): ID of the walk.
-
-            Returns:
-                List[List[Union[int, str]]]: List of lists, each sublist containing the details of a step in the
-                walk.
-                Each sublist has the format: [walk_id, step, from_node, from_multiplex, from_layer, to_node,
-                to_multiplex, to_layer].
-            """
             walk_logs = []
             # Invert mapping to get node ID to from given index, one node ID can have multiple index by layer
-            index_to_node = {index: node for node, indices in self.node_to_index.items() for index in
-                             indices}
+            index_to_node = {index: node for node, indices in self.node_to_index.items() for index in indices}
 
             # Each walk starts from a random seed node, randomly select its layer
             current_node = int(numpy.random.choice(seeds))
@@ -266,30 +253,39 @@ class Multixrank(object):
                     to_layer_index = self.layer_index_map[to_layer]
                     to_index = self.node_to_index[to_node][to_layer_index]
                 else:
-                    # Determine the next node based on transition probabilities
-                    possible_transitions = [(i, j, val) for i, j, val in zip(transition_matrixcoo.row,
-                                                                             transition_matrixcoo.col,
-                                                                             transition_matrixcoo.data) if
-                                            i == current_index]
-                    # restart if no outgoing edges (possible transitions)
-                    if not possible_transitions:
+                    start_idx = transition_matrixcsr.indptr[current_index]
+                    end_idx = transition_matrixcsr.indptr[current_index + 1]
+
+                    # Check if the current node has no outgoing edges, if not, restart with a seed node
+                    if start_idx == end_idx:
                         to_node = int(numpy.random.choice(seeds))
                         to_multiplex, to_layer = self.__get_node_multiplex_and_layer(to_node)
                         to_layer_index = self.layer_index_map[to_layer]
                         to_index = self.node_to_index[to_node][to_layer_index]
                     else:
-                        # select index of the next node based on the transition probabilities, use index to find node ID
-                        to_index = int(random.choices(population=[j for _, j, _ in possible_transitions],
-                                                      weights=[val for _, _, val in possible_transitions], k=1)[0])
-                        to_node = index_to_node[to_index]
-                        node_indices = self.node_to_index.get(to_node)
-                        if node_indices is not None:
-                            # Find the index of the given index within the node indices
-                            to_layer_index = node_indices.index(to_index)
+                        probabilities = transition_matrixcsr.data[start_idx:end_idx]
+                        columns = transition_matrixcsr.indices[start_idx:end_idx]
 
-                        # find the matching multiplex and layer determined by the index
-                        to_multiplex, to_layer = self.__get_node_multiplex_and_layer(to_node, current_layer,
-                                                                                     current_multiplex, to_layer_index)
+                        # Remove the possibility of a self-loop by excluding the current_index from columns
+                        no_self_loop_indices = columns[columns != current_index]
+                        no_self_loop_probabilities = probabilities[columns != current_index]
+
+                        if no_self_loop_indices.size > 0:
+                            # Normalize probabilities and select the next node
+                            normalized_probabilities = no_self_loop_probabilities / no_self_loop_probabilities.sum()
+                            to_index = numpy.random.choice(no_self_loop_indices, p=normalized_probabilities)
+                            to_node = index_to_node[to_index]
+                            node_indices = self.node_to_index.get(to_node)
+                            if node_indices is not None:
+                                to_layer_index = node_indices.index(to_index)
+                            to_multiplex, to_layer = self.__get_node_multiplex_and_layer(to_node, to_layer_index)
+                        else:
+                            # Handle case where no transitions are available without self-loop， restart with a seed node
+                            to_node = int(numpy.random.choice(seeds))
+                            to_multiplex, to_layer = self.__get_node_multiplex_and_layer(to_node)
+                            to_layer_index = self.layer_index_map[to_layer]
+                            to_index = self.node_to_index[to_node][to_layer_index]
+
                 # log current step
                 walk_logs.append([walk_id, step, current_node, current_multiplex, current_layer,
                                   to_node, to_multiplex, to_layer])
@@ -301,7 +297,6 @@ class Multixrank(object):
                                                                                                       to_index
 
             return walk_logs
-
         # Perform random walks in parallel to speed up the process
         with ThreadPoolExecutor() as executor:
             results = executor.map(single_walk, range(num_walks))
@@ -360,10 +355,11 @@ class Multixrank(object):
         transition_matrix_obj = TransitionMatrix(multiplex_all=self.multiplexall_obj, bipartite_matrix=bipartite_matrix,
                                                  lamb=self.lamb)
         transition_matrixcoo = transition_matrix_obj.transition_matrixcoo
+        # change to csr format to improve performance
+        transition_matrixcsr = transition_matrixcoo.tocsr()
 
         seeds = self.seed_obj.seed_list
-
-        random_walk_df = self.__simulated_random_walk_with_restart(transition_matrixcoo, seeds, self.r, max_walk,
+        random_walk_df = self.__simulated_random_walk_with_restart(transition_matrixcsr, seeds, self.r, max_walk,
                                                                    max_step)
         return random_walk_df
 
