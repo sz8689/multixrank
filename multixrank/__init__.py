@@ -267,8 +267,12 @@ class Multixrank(object):
                         columns = transition_matrixcsr.indices[start_idx:end_idx]
 
                         # Remove the possibility of a self-loop by excluding the current_index from columns
-                        no_self_loop_indices = columns[columns != current_index]
-                        no_self_loop_probabilities = probabilities[columns != current_index]
+                        same_node_index = self.node_to_index[current_node]
+                        # Exclude indices present in same_node_index from columns
+                        no_self_loop_indices = columns[~numpy.isin(columns, same_node_index)]
+                        # no_self_loop_indices = columns[columns != current_index]
+                        no_self_loop_probabilities = probabilities[~numpy.isin(columns, same_node_index)]
+                        # no_self_loop_probabilities = probabilities[columns != current_index]
 
                         if no_self_loop_indices.size > 0:
                             # Normalize probabilities and select the next node
@@ -351,6 +355,8 @@ class Multixrank(object):
             pandas.DataFrame: DataFrame logging each walk's step with columns:
                 ['walk_id', 'step', 'from_node', 'from_multiplex', 'from_layer', 'to_node', 'to_multiplex', 'to_layer'].
         """
+        random.seed(201)
+        numpy.random.seed(201)
         bipartite_matrix = self.bipartiteall_obj.bipartite_matrix
         transition_matrix_obj = TransitionMatrix(multiplex_all=self.multiplexall_obj, bipartite_matrix=bipartite_matrix,
                                                  lamb=self.lamb)
